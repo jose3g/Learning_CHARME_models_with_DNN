@@ -1,3 +1,3 @@
-# Learning_CHARME_models_with_DNN
+# Learning CHARME models with DNN
 
 
