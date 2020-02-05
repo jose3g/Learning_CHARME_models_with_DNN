@@ -1,3 +1,3 @@
-# Learning CHARME models with DNN
+# Learning CHARME models with DNN: Numerical experiments
 
 
