@@ -198,8 +198,6 @@ The following figure shows the Gaussian behavior of the errors obtained
 ```{r}
 hist(hat.e, prob=TRUE, breaks=30, ylim=c(0, 0.52), main = '', xlab = 'hat.e_t')
 curve(dnorm(x, mean(hat.e), sd(hat.e)), add=TRUE, col="darkblue", lwd=2)
-lines(density(hat.e), col='red', lwd=2)
-legend(1, 0.5, legend=c("Gaussian density", "Empirical density"), col=c("darkblue", "red"), lty=1, lwd=2)
 ```
 
 -----------------------------------------------------------------------------------------------------------------------------
@@ -305,7 +303,7 @@ model2_e2 %>%
 model2_e2 %>% compile(
   loss = 'mean_squared_error',
   optimizer = 'sgd', #lr = 0.001, decay = 0.5, 
-  metrics = 'mae'
+  #metrics = 'mae'
 )
 
 X.train2_e2 <- E2[, 3:ncol(E2)]
@@ -331,7 +329,7 @@ model3_e2 %>%
 model3_e2 %>% compile(
   loss = 'mean_squared_error',
   optimizer = 'sgd',# lr = 0.001, decay = 0.5,
-  metrics = 'mae'
+  #metrics = 'mae'
 )
 
 X.train3_e2 <- E3[, 3:ncol(E3)]
@@ -365,8 +363,6 @@ The following figure shows the Gaussian behavior of the errors obtained
 ```{r}
 hist(hat.e.2, prob=TRUE, breaks=40, ylim = c(0, 1.6), main = '', xlab = 'hat.e_t')
 curve(dnorm(x, mean(hat.e.2), sd(hat.e.2)), add=TRUE, col="darkblue", lwd=2)
-lines(density(hat.e.2), col='red', lwd=2)
-legend(0.5, 1.5, legend=c("Gaussian density", "Empirical density"), col=c("darkblue", "red"), lty=1, lwd=2)
 ```
 
 -----------------------------------------------------------------------------------------------------------------------------
