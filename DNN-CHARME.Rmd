@@ -1,0 +1,903 @@
+---
+title: "Learning CHARME models with DNN"
+author: "José Gregorio Gómez-García, Jalal Fadili, Christophe Chesneau"
+date: "7/2/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Summary 
+
+- This is an [R Markdown](http://rmarkdown.rstudio.com). You can execute the entire code by clicking "Knit" or taping *Ctrl+Shift+K*. The results will 
+appear beneath each chuck. 
+
+- You can also execute each chuck by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*.
+
+- In this R Markdown we present the codes in order to reproduce the experiments of the article: [Learning CHARME models with
+neural networks](https://arxiv.org/abs/2002.03237).
+
+--------------------------------------------------------------------------------
+
+### Requeriments 
+
+First, install the tensorflow R package from GitHub as follows:
+
+```{r}
+#install.packages("tensorflow") 
+```
+
+Then, use the [`install_tensorflow()`](https://tensorflow.rstudio.com/reference/tensorflow/install_tensorflow/) function to install TensorFlow. Note that on Windows you need a working installation of [Anaconda](https://www.anaconda.com/products/distribution).
+
+```{r}
+library(tensorflow)
+install_tensorflow()
+```
+You can confirm that the installation succeeded with:
+
+```{r}
+library(tensorflow)
+tf$constant("Hellow Tensorflow")
+```
+Before running the quickstart you need to have Keras and sigmoid installed.  
+```{r}
+library(keras)
+library(sigmoid)
+```
+
+You need also to load the functions from *charme_tools.R*. 
+
+```{r Load set of utility functions (e.g. sample.model.architecture)}
+source("charme_tools.R")
+```
+
+*charme_tools.R* contains the following functions:
+
+- `sample.model.architecture`, which randomly generates the weights of the specified dense architecture. 
+\
+Here, units.vector = c($N_0$, $N_1$, ..., $N_L$), where $N_0=$dimension_input, $N_L=$dimension_output and  delta is such that the rang of the values of W are in [-delta, delta].
+
+Example: 
+```{r}
+Architecture <- sample.model.architecture(units.vector=c(5,8,10,10,1), delta=0.3)
+Architecture[[2]]
+```
+
+- `model_function`, which is the neural network parametrized by a list of weights and biases. 
+For example, this list of weights and biases can be generated with the `sample.model.architecture` function. 
+
+Here, the parameter `weights_biases` is a list, where for each `l`, `weights_biases[[l]]` is the extended matrix $(W^{(l)}, b^{(l)})$ (see [article](https://arxiv.org/abs/2002.03237)) and `x0` is the input (no extended).
+
+Example:
+```{r}
+x0 <- c(1,-1,2,9,3)
+model_function(weights_biases=Architecture[[1]], activation.function=relu, x0)
+```
+
+- `Switching`, which generates `n` values between `1` and `length(prob)` with probabilities `prob` (the vector of probability weights). Note that `sum(prob)`$=\sum_{i=1}^p \pi_i=1$ must be equal `1`. 
+
+Example: 
+```{r}
+S <- Switching(20, c(0.25,0.1,0.25, 0.4))
+S
+```
+
+- `Index_Switching`, which gives the indexes `i` such that *Observations[i]=x*.
+
+Example:
+```{r}
+Index_Switching(S, x=1)
+```
+
+- `T_KG`, which transforms a list in Keras format to `sample.model.architecture` format. 
+
+For the Multivariate Normality Tests (MVN) of [Korkmaz et al, (2014)](https://cran.r-project.org/web/packages/MVN/index.html) you need a version of R greater than 3.5. In this case, we can install the package MVN:
+```{r}
+#install.packages("MVN")
+library(MVN)
+```
+
+Otherwise, don't worry, we have included the necessary setClass and functions in
+*charme_tools_MVN.R*, taken from the [old versions](https://cran.r-project.org/src/contrib/Archive/MVN/) in the CRAN).
+
+If *MVN* package is not available, load the `charme_tools_MVN.R` file : 
+
+```{r setClass and functions from old version of MVN package}
+#source("charme_tools_MVN.R")
+```
+
+--------------------------------------------------------------------------------
+
+## 1. Training NNs with a NN-based CHARME data.
+
+### 1.1. Generation of the data
+
+#### 1.1.1. Generation of the true parameter $\theta^{0}$ of the model:
+```{r}
+NN1 <- sample.model.architecture(c(30,50,60,40,20,1), 0.1) 
+NN2 <- sample.model.architecture(c(30,20,5,1), 0.09) 
+NN3 <- sample.model.architecture(c(30,25,30,1), 0.05) 
+# 10295 parameters
+```
+Now, we change the last biases in order to obtain abrupt changes
+```{r}
+NN1[[1]][[length(NN1[[1]])]][1,21] <- 1
+NN2[[1]][[length(NN2[[1]])]][1,6] <- 0
+NN3[[1]][[length(NN3[[1]])]][1,31] <- -1
+```
+We set the probabilities $(\pi_1, \pi_2, \pi_3)=(0.1, 0.4, 0.5)$. Notice that $c=\sum_{k=1}^{3}\pi_k A_k$ must be less than 1 in order to obtain stationarity in the model. In fact, 
+```{r}
+prob <- c(0.1, 0.4, 0.5)
+c <- prob%*%c(NN1[[2]], NN2[[2]], NN3[[2]])
+c
+```
+
+Once we have verified that $c <1$, we forget the $A_k=$`NNk[[2]]` and we rename the parameters as follows:
+```{r}
+NN1 <- NN1[[1]] #theta_1^0
+NN2 <- NN2[[1]] #theta_2^0
+NN3 <- NN3[[1]] #theta_3^0
+```
+
+#### 1.1.2. Generation of the time series
+```{r}
+n <- 100000
+X <- c(NA)
+p <- ncol(NN1[[1]])-1
+e <- rnorm(n+100)
+X[1:p] <- e[1:p]
+S <- Switching(n+100,prob)
+for (t in (p+1):(n+100)){
+  X[t] <- (rep(S[t],length(prob)) == 1:length(prob)) %*% c(model_function(NN1, relu, X[(t-1):(t-p)]),
+                                                           model_function(NN2, relu, X[(t-1):(t-p)]), 
+                                                           model_function(NN3, relu, X[(t-1):(t-p)])) + e[t]
+}
+St <- S[100:length(S)]
+Xt <- X[100:length(S)]
+plot(Xt[1:1000], col=St, pch='*', ylab = 'X_t', xlab = 't' )
+lines(Xt[1:1000],lty=3)
+```
+
+### 1.2. Estimation or learning
+
+
+We build a matrix $D=[R_t, X_t, (X_{t-1}, \ldots, X_{t-p})] \in \mathbb{M}_{n\times p+2}(\mathbb{R})$ that we separate according to the state of $R_t$: 
+```{r}
+D <- matrix(NA, ncol = p+2, nrow = n-p)
+for (t in 1:(n-p)){
+  D[t,] <- c(St[t+p], Xt[(t+p):t])
+}
+D1 <- D[Index_Switching(D[,1],1),]
+D2 <- D[Index_Switching(D[,1],2),]
+D3 <- D[Index_Switching(D[,1],3),]
+```
+For each case, we set the NN model and then estimate the weights and biases via the SGD algorithm.
+
+#### For the regime or state 1:
+```{r}
+model1 <- keras_model_sequential()
+
+model1 %>% 
+  layer_dense(units = 50, input_shape = 30) %>%
+  #layer_dropout(rate=0.25)%>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 60) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 40) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 20) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 1)
+
+model1 %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_sgd()
+  metrics = 'mae'
+)
+
+X.train1 <- D1[, 3:ncol(D1)]
+Y.train1 <- D1[,2]
+
+model1 %>% fit(X.train1, Y.train1, epochs = 20)
+
+cat("\014") # is the code to send CTRL+L to the console and therefore will clear the screen.
+```
+
+#### For the regime or state 2:
+```{r}
+model2 <- keras_model_sequential()
+
+model2 %>% 
+  layer_dense(units = 20, input_shape = 30) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 5) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 1)
+
+model2 %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_sgd(), #optimizer_sgd(learning_rate = 0.001, decay=0.5),
+  metrics = 'mae'
+)
+
+X.train2 <- D2[, 3:ncol(D1)]
+Y.train2 <- D2[,2]
+
+model2 %>% fit(X.train2, Y.train2, epochs = 20)
+
+cat("\014") # is the code to send CTRL+L to the console and therefore will clear the screen.
+```
+
+#### For the regime or state 3:
+```{r}
+model3 <- keras_model_sequential()
+
+model3 %>% 
+  layer_dense(units = 25, input_shape = 30) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 30) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 1)
+
+model3 %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_sgd(), #optimizer_sgd(learning_rate = 0.001, decay=0.5), 
+  metrics = 'mae'
+)
+
+X.train3 <- D3[, 3:ncol(D1)]
+Y.train3 <- D3[,2]
+
+model3 %>% fit(X.train3, Y.train3, epochs = 20)
+
+cat("\014") # is the code to send CTRL+L to the console and therefore will clear the screen.
+```
+
+### 1.3. Study of the resilduals. 
+
+To do this, we first transform the list of weights and biases calculated in Keras format to our format in order to give the estimated autogression functions
+```{r}
+cat("\014") # is the code to send CTRL+L to the console and therefore will clear the screen. 
+theta1_t <- T_KG(get_weights(model1))
+theta2_t <- T_KG(get_weights(model2))
+theta3_t <- T_KG(get_weights(model3))
+```
+and calculate the estimated residuals: $\hat{\epsilon}_t=X_t^{(k)}-f_k(X_{t-1}, \ldots, X_{t-p}; \hat{\theta_k})$ according to the case. 
+```{r}
+hat.e1 <- Y.train1 - apply(X.train1, 1, function(x){model_function(theta1_t, relu, x)})
+hat.e2 <- Y.train2 - apply(X.train2, 1, function(x){model_function(theta2_t, relu, x)})
+hat.e3 <- Y.train3 - apply(X.train3, 1, function(x){model_function(theta3_t, relu, x)})
+hat.e <- c(hat.e1, hat.e2, hat.e3)
+```
+
+The following figures shows the Gaussian behavior of the errors obtained
+```{r}
+par(mfrow=c(1,3))
+hist(hat.e, prob=TRUE, breaks=40, ylim=c(0,0.42), main = 'Histogram of residuals', xlab = 'estimated residuals')
+curve(dnorm(x, mean(hat.e), sd(hat.e)), add=TRUE, col="red", lwd=2)
+lines(density(hat.e), col='blue')
+qqnorm(hat.e)
+abline(a=0, b=1, col='red')
+s <- sample(1:length(hat.e), 1000)
+plot(hat.e[s], ylab = 'estimated residual', main = "Residuals vs index"  )
+abline(a=0, b=0, col='red')
+```
+
+---------------------------------------------------------------------------------
+
+## 2. Training NNs with a mixing CHARME data.
+
+### 2.1. Generation of the data
+
+We consider first the following functions:
+```{r}
+f_ar <- function(ar_parameters, input){
+  return(ar_parameters[-1]%*%input + ar_parameters[1])
+}
+f_arch <- function(arch_parameters, input){
+  return(sqrt(arch_parameters[-1]%*%input^2 +  arch_parameters[1]))
+}
+```
+
+So, we generate the data:
+```{r}
+n <- 100000
+X2 <- c(NA)
+p <- 5
+X2[1:p] <- rnorm(5) 
+e2 <- rnorm(n+100)
+prob2 <- c(0.15, 0.35, 0.5)
+S2 <- Switching(n+100,prob2)
+parameter1 <- c(0.1, 0.05, 0.2, 0.15, 0.03, 0.01)
+parameter2 <- c(-3, 0.2, 0.1, 0.25, 0.2, 0.05)
+c_e2 <- prob2%*%c(1, sum(parameter1[-1]), sum(parameter2[-1]))
+c_e2
+for (t in (p+1):(n+100)){
+  X2[t] <- (rep(S2[t],length(prob2)) == 1:length(prob2)) %*% c(3 + X2[t-1], 
+                                                               f_arch(parameter1, X2[(t-1):(t-p)]), 
+                                                               f_ar(parameter2, X2[(t-1):(t-p)])) + e2[t]
+}
+St2 <- S2[100:length(S2)]
+Xt2 <- X2[100:length(S2)]
+plot(Xt2[1:2000], col=St2, pch='*', ylab = 'X_t', xlab = 't' )
+lines(Xt2[1:2000],lty=3)
+```
+
+### 2.2. Estimation or learning
+
+Similarly to 1.2, we build a matrix $E=[R_t, X_t, (X_{t-1, \ldots, X_{t-p}})] \in \mathbb{M}_{n\times (p+2)}(\mathbb{R})$ that we then separate according to the states of $R_t$:
+```{r}
+E <- matrix(NA, ncol = p+2, nrow = n-p)
+for (t in 1:(n-p)){
+  E[t,] <- c(St2[t+p], Xt2[(t+p):t])
+}
+E1 <- E[Index_Switching(E[,1],1),]
+E2 <- E[Index_Switching(E[,1],2),]
+E3 <- E[Index_Switching(E[,1],3),]
+```
+
+For each case, we set the NN model and then estimate the weights and biases via the SGD algorithm.
+
+#### For the regime or state 1:
+```{r}
+model1_e2 <- keras_model_sequential()
+
+model1_e2 %>% 
+  layer_dense(units = 30, input_shape = 5) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 40) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 20) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 1)
+
+model1_e2 %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_sgd(learning_rate = 0.001), #lr = 0.00001, # decay = 0.5,
+  metrics = 'mae'
+)
+
+X.train1_e2 <- E1[, 3:ncol(E1)]
+Y.train1_e2 <- E1[,2]
+
+model1_e2 %>% fit(X.train1_e2, Y.train1_e2, epochs = 20)
+
+cat("\014") # is the code to send CTRL+L to the console and therefore will clear the screen. 
+```
+
+#### For the regime or state 2:
+```{r}
+model2_e2 <- keras_model_sequential()
+
+model2_e2 %>% 
+  layer_dense(units = 50, input_shape = 5) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 60) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 40) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 1)
+
+model2_e2 %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_sgd(learning_rate = 0.001),
+  metrics = 'mae'
+)
+
+X.train2_e2 <- E2[, 3:ncol(E2)]
+Y.train2_e2 <- E2[,2]
+
+model2_e2 %>% fit(X.train2_e2, Y.train2_e2, epochs = 20)
+
+cat("\014") # is the code to send CTRL+L to the console and therefore will clear the screen. 
+```
+
+#### For the regime or state 3:
+```{r}
+model3_e2 <- keras_model_sequential()
+
+model3_e2 %>% 
+  layer_dense(units = 30, input_shape = 5) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 40) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 20) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 1)
+
+model3_e2 %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_sgd(learning_rate = 0.001), # lr = 0.001, decay = 0.5,
+  #metrics = 'mae'
+)
+
+X.train3_e2 <- E3[, 3:ncol(E3)]
+Y.train3_e2 <- E3[,2]
+
+model3_e2 %>% fit(X.train3_e2, Y.train3_e2, epochs = 20)
+
+cat("\014") # is the code to send CTRL+L to the console and therefore will clear the screen. 
+```
+
+### 2.3. Study of the residuals 
+
+In order to do this, we first transform the list of weights and biases calculated in Keras format to our format in order to give the estimated autogression functions
+```{r}
+theta1_e2_t <- T_KG(get_weights(model1_e2))
+theta2_e2_t <- T_KG(get_weights(model2_e2))
+theta3_e2_t <- T_KG(get_weights(model3_e2))
+```
+and calculate the errors $\hat{\epsilon}_t=X_t^{(k)}-f_k(X_{t-1}, \ldots, X_{t-p}; \hat{\theta_k})$ according to the case 
+```{r}
+hat.e1.2 <- Y.train1_e2 - apply(X.train1_e2, 1, function(x){model_function(theta1_e2_t, relu, x)})
+hat.e2.2 <- Y.train2_e2 - apply(X.train2_e2, 1, function(x){model_function(theta2_e2_t, relu, x)})
+hat.e3.2 <- Y.train3_e2 - apply(X.train3_e2, 1, function(x){model_function(theta3_e2_t, relu, x)})
+hat.e.2 <- c(hat.e1.2, hat.e2.2, hat.e3.2)
+```
+
+The following figures shows the Gaussian? behavior of the errors obtained
+```{r}
+par(mfrow=c(1,3))
+hist(hat.e.2, prob=TRUE, breaks=40, ylim=c(0,0.45), main = 'Histogram of residuals', xlab = 'estimated residuals')
+curve(dnorm(x, mean(hat.e.2), sd(hat.e.2)), add=TRUE, col="red", lwd=2)
+lines(density(hat.e.2), col='blue')
+qqnorm(hat.e.2)
+abline(a=0, b=1, col='red')
+s <- sample(1:length(hat.e.2), 1000)
+plot(hat.e.2[s], ylab = 'estimated residual', main = "Residuals vs index"  )
+abline(a=0, b=0, col='red')
+```
+
+--------------------------------------------------------------------------------
+
+## 3. Training NNs with a non-mixing data.
+
+### 3.1. Generation of the data
+
+For simplicity, we consider here $K=1$. 
+
+```{r}
+n=100000
+p=0.7
+lmda =1
+X <- c(NA)
+X[1] <- rpois(1,lambda = lmda)
+for (i in 1:n){
+  X[i+1] <- sum(rbinom(X[i],1,p)) + rpois(1,lmda)
+}
+plot((n-500):n, X[(n-500):n], type = 'l', xlim = c((n-500),n), xlab = "k", ylab = "Xk")
+points((n-500):n,X[(n-500):n], col='red', pch = 20 )
+```
+
+```{r}
+Xt <- X[1:(n-1)]
+Xt1 <- X[2:n]
+plot(Xt,Xt1, xlab = "X(k)", ylab = "X(k+1)")
+```
+
+### 3.2. Estimation or learning
+
+```{r}
+model_nm <- keras_model_sequential()
+
+  model_nm %>% 
+  layer_dense(units = 150, input_shape = 1) %>%
+  #layer_dropout(rate=0.25)%>%
+  layer_activation(activation = 'sigmoid') %>%
+  layer_dense(units = 150) %>%
+  layer_activation(activation = 'sigmoid') %>%
+  layer_dense(units = 150) %>%
+  layer_activation(activation = 'sigmoid') %>%
+  layer_dense(units = 150) %>%
+  layer_activation(activation = 'sigmoid') %>%
+  layer_dense(units = 1)
+
+model_nm %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_sgd(learning_rate = 0.001), #lr = 0.001, decay = 0.5,
+  metrics = 'mae'
+)
+
+X.train_nm <- X[1:(n-1)]
+Y.train_nm <- X[2:n]
+
+model_nm %>% fit(X.train_nm, 
+               Y.train_nm, 
+               epochs=20
+               )
+cat("\014") # is the code to send CTRL+L to the console and therefore will clear the screen. 
+```
+
+### 3.3. Study of the resilduals. 
+
+To do this, we first transform the list of weights and biases calculated in Keras format to our format in order to give the estimated autogression functions
+```{r}
+theta <- T_KG(get_weights(model_nm))
+```
+and calculate the errors $\hat{\epsilon}_k=X_k-f(X_{t-1}; \hat{\theta})$ according to the case 
+```{r}
+hat.e_nm <- Y.train_nm - apply(as.matrix(X.train_nm), 1, function(x){model_function(theta, sigmoid, x)})
+```
+
+The following figures shows the Gaussian behavior of the errors obtained
+```{r}
+hist(hat.e_nm, prob=TRUE, breaks=40, ylim=c(0,0.35), main = 'Histogram of residuals', xlab = 'estimated residuals')
+lines(density(hat.e_nm), col='blue')
+
+```
+
+## 4. Link between the number of neurons and the variability of the estimated residuals
+
+### 4.1. Learning of a non-linear based data
+
+#### 4.1.1. Generation of the time series
+```{r}
+n1 <- 100000
+X_nl <- c(NA)
+p1 <-  5
+X_nl[1:p1] <- rnorm(p1)
+e_a <- rnorm(n1+100)
+parameter1 <- c(0.15, 0.2, 0.15, 0.1, 0.3)
+c_a <- sum(parameter1)
+for (t in ((p1+1):(n1+100))){
+  X_nl[t] <- sin(parameter1%*%(X_nl[(t-1):(t-p1)])) + e_a[t]
+}
+Xt_nl <- X_nl[100:length(X_nl)]
+plot(Xt_nl[1:2000], type='l', ylab = 'X_t', xlab = 't')
+
+```
+
+
+#### 4.1.2 Link between variability and number of neurons 
+
+```{r}
+Variance1 <- c(NA)
+Mean1 <- c(NA)
+Mae1 <-c(NA)
+epsilons1 <- list(NA)
+
+Mn1 <- 10
+Data1 <- matrix(NA, ncol = p1+1, nrow = n1-p1)
+for (t in 1:(n1-p1)){
+  Data1[t,] <- Xt_nl[(t+p1):t]
+}
+X.train_v1 <- Data1[, 2:ncol(Data1)]
+Y.train_v1 <- Data1[,1]
+
+for (k in 1:Mn1){
+  nbr.neu = 30 + 30*(k-1)
+  model_aux <- keras_model_sequential()
+
+  model_aux %>% 
+  layer_dense(units = nbr.neu, input_shape = p1) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = nbr.neu) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = nbr.neu ) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = nbr.neu ) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 1)
+
+model_aux %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_sgd(learning_rate = 0.01),
+  #metrics = 'mae'
+)
+
+model_aux %>% fit(X.train_v1, Y.train_v1, epochs = 500) #epochs=500 for the paper
+
+cat("\014") # is the code to send CTRL+L to the console and therefore will clear the screen. 
+#-----
+theta_aux <- T_KG(get_weights(model_aux))
+hat.e_aux <- Y.train_v1 - apply(X.train_v1, 1, function(x){model_function(theta_aux, relu, x)})
+Variance1[k] <- var(hat.e_aux)
+Mean1[k] <- mean(hat.e_aux)
+Mae1[k] <- mean(abs(hat.e_aux))
+epsilons1[[k]] <- hat.e_aux
+}
+cat("\014") 
+```
+
+```{r}
+sample_epsilons1 <- list(NA)
+set <- sample(1:n1, 100)
+for (k in 1:Mn1){
+  sample_epsilons1[[k]] <- epsilons1[[k]][set]
+}
+```
+
+
+```{r}
+par(mfrow=c(1,2))
+plot(Variance1, type='l', xlab='4*(30 + 30*(k-1)) hidden neurons', main = 'Residual variance', ylab = "Variance and MAE", xlim=c(1,10))
+lines(Mae1, col='red')
+boxplot(sample_epsilons1, ylim=c(-3,3), xlim=c(0.5,10.5), xlab='3*(30 + 30*(k-1)) hidden neurons', main='Boxplot of residuals')
+#boxplot(epsilons1, ylim=c(-5,5), xlim=c(0.5,10.5), xlab='3*(30 + 30*(k-1)) hidden neurons', main='Boxplot of residuals')
+lines(Mean1, col='red')
+abline(a=0, b=0, col='blue', lty=3)
+```
+
+### 4.2. Learning of AR-ARCH-based data (mixing data) 
+
+#### 4.2.2. Generation of the time series
+
+Here, we work with $K=1$ regimes. Moreover, we consider a volatility function within resildual part. Precisely, we consider a AR-ARCH model. 
+
+```{r AR-ARCH model}
+n2 <- 100000
+X_arch <- c(NA)
+p2 <- 5
+X_arch[1:p2] <- rnorm(5)
+e_a <- rnorm(n2+100)
+parameter1 <- c(0.05, 0.05, 0.015, 0.1, 0.03)
+parameter2 <- c(0.1, 0.1, 0.1, 0.25, 0.1)
+c_a <- sum(parameter1) + sum(parameter2)
+c_a
+for (t in ((p2+1):(n2+100))){
+  X_arch[t] <- 1 + parameter1%*%(X_arch[(t-1):(t-p2)]) + sqrt(parameter2%*%(X_arch[(t-1):(t-p2)])^2)*e_a[t]
+  # X_arch[t] <- 100*sin(pi*t/500) + parameter1%*%(X_arch[(t-1):(t-p)]) + sqrt(parameter2%*%(X_arch[(t-1):(t-p)])^2)*e_a[t]
+}
+Xt_arch <- X_arch[100:length(X_arch)]
+plot(Xt_arch[1:2000], type='l', ylab = 'X_t', xlab = 't')
+```
+
+#### 4.2.3 Link between variability and number of neurons 
+
+```{r}
+Variance2 <- c(NA)
+Mean2 <- c(NA)
+Mae2 <-c(NA)
+epsilons2 <- list(NA)
+#
+Mn2 <- 10
+Data2 <- matrix(NA, ncol = p2+1, nrow = n2-p2)
+for (t in 1:(n2-p2)){
+  Data2[t,] <- Xt_arch[(t+p2):t]
+}
+X.train_v2 <- Data2[, 2:ncol(Data2)]
+Y.train_v2 <- Data2[,1]
+
+for (k in 1:Mn2){
+  nbr.neu = 30 + 30*(k-1)
+  model_aux <- keras_model_sequential()
+
+  model_aux %>% 
+  layer_dense(units = nbr.neu, input_shape = p2) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = nbr.neu) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = nbr.neu ) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = nbr.neu ) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_dense(units = 1)
+
+model_aux %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_sgd(learning_rate = 0.001),
+  #metrics = 'mae'
+)
+
+model_aux %>% fit(X.train_v2, Y.train_v2, epochs = 500) #epochs = 500 for the paper
+
+cat("\014") # is the code to send CTRL+L to the console and therefore will clear the screen. 
+#-----
+theta_aux <- T_KG(get_weights(model_aux))
+hat.e_aux <- Y.train_v2 - apply(X.train_v2, 1, function(x){model_function(theta_aux, relu, x)})
+Variance2[k] <- var(hat.e_aux)
+Mean2[k] <- mean(hat.e_aux)
+Mae2[k] <- mean(abs(hat.e_aux))
+epsilons2[[k]] <- hat.e_aux
+}
+cat("\014") 
+```
+
+```{r}
+sample_epsilons2 <- list(NA)
+set <- sample(1:n2, 100)
+for (k in 1:Mn2){
+  sample_epsilons2[[k]] <- epsilons2[[k]][set]
+}
+```
+
+```{r}
+par(mfrow=c(1,2))
+plot(Variance2, ylim = c(1,3.5), type='l', xlab='4*(30 + 30*(k-1)) hidden neurons', main = 'Residual variance', ylab = "Variance and MAE", xlim=c(1,10))
+lines(Mae2, col='red')
+boxplot(sample_epsilons2, ylim=c(-5,5), xlim=c(0.5,10.5), xlab='3*(30 + 30*(k-1)) hidden neurons', main='Boxplot of residuals')
+#boxplot(epsilons2, ylim=c(-10,10), xlim=c(0.5,10.5), xlab='3*(30 + 30*(k-1)) hidden neurons', main='Boxplot of residuals')
+lines(Mean2, col='red')
+abline(a=0, b=0, col='blue', lty=3)
+```
+
+--------------------------------------------------------------------------------
+
+## 5. Asymptotic normality of trained NNs.
+
+### 5.1. Generation of the data
+
+#### 5.1.1. Generation of the true parameter $\theta^{0}$ of the model:
+```{r}
+red1 <- sample.model.architecture(c(16,32,64,32,1), 0.08) 
+red2 <- sample.model.architecture(c(16,64,32,1), 0.035)
+red3 <- sample.model.architecture(c(16,32,64, 1), 0.07)
+```
+
+Now, we change the last biases in order to obtain abrupt changes
+```{r}
+red1[[1]][[length(red1[[1]])]][1,21] <- 1
+red2[[1]][[length(red2[[1]])]][1,6] <- 0
+red3[[1]][[length(red3[[1]])]][1,31] <- -1
+```
+
+We set the probabilities $(\pi_1, \pi_2, \pi_3)=(0.4, 0.5, 0.1)$. Notice that $c=\sum_{k=1}^{3}\pi_k A_k$ must be less than or equal to 1 in order to obtain the stationarity of the model. In fact, 
+```{r}
+prob <- c(0.4, 0.5, 0.1)
+c <- prob%*%c(red1[[2]], red2[[2]], red3[[2]])
+c
+```
+
+Once we have verified that $c <1$, we forget the $A_k=redk[[2]]$ and we rename the parameters as follows:
+```{r}
+red1 <- red1[[1]]
+red2 <- red2[[1]]
+red3 <- red3[[1]]
+
+red1_0 <- unlist(red1)
+red2_0 <- unlist(red2)
+red3_0 <- unlist(red3)
+n.parameters <- length(c(red1_0, red2_0, red3_0))
+```
+Here, n.parameters is a vector that contains all the true parameters $\theta^0$. 
+
+### 5.2. Monte Carlo simulation 
+\
+Now, we calculate $N=$`n.samplings` times $\hat{\theta}_n$, with $n=20000$, the estimator of the true parameter $\theta^0$. The $N$ estimated parameters are arranged in a matrix `theta.centered`, where the number of columns is the size of the parameters space and the number of rows is the number of samples of Monte Carlo. 
+
+```{r warning=FALSE}
+n.samplings <- 125
+n <- 50000
+n.iterations.bp <- 500 #This is the number of iteration of the SGD algorithm.
+p <- ncol(red1[[1]])-1
+theta.centered <- matrix(NA, ncol = n.parameters, nrow = n.samplings)
+for (i in 1:n.samplings){
+  print(paste("Iteration = ", i))
+  X <- c(NA)
+  e <- rnorm(n+100)
+  X[1:p] <- e[1:p]
+  S <- Switching(n+100,prob)
+  for (t in (p+1):(n+100)){
+    X[t] <- (rep(S[t],length(prob)) == 1:length(prob))%*%c(model_function(red1, sigmoid, X[(t-1):(t-p)]),
+                                                             model_function(red2, sigmoid, X[(t-1):(t-p)]), 
+                                                             model_function(red3, sigmoid, X[(t-1):(t-p)]))+e[t]
+  }
+  St <- S[101:length(S)]
+  Xt <- X[101:length(S)]
+  # Estimation
+  D <- matrix(NA, ncol = p+2, nrow = n-p)
+  for (t in 1:(n-p)){
+    D[t,] <- c(St[t+p], Xt[(t+p):t])
+  }
+  #---
+  D1 <- D[Index_Switching(D[,1],1),]
+  
+  model1 <- keras_model_sequential()
+  
+  model1 %>% 
+    layer_dense(units = 32, input_shape = 16) %>%
+    layer_activation(activation = 'sigmoid') %>%
+    layer_dense(units = 64) %>%
+    layer_activation(activation = 'sigmoid') %>%
+    layer_dense(units = 32) %>%
+    layer_activation(activation = 'sigmoid') %>%
+    layer_dense(units = 1)
+  
+  model1 %>% compile(
+    loss = 'mean_squared_error',
+    optimizer = optimizer_sgd(learning_rate = 0.001,  decay = 0.2)
+    #metrics = 'mae'
+  )
+  
+  X.train1 <- D1[, 3:ncol(D1)]
+  Y.train1 <- D1[,2]
+  
+  model1 %>% fit(X.train1, Y.train1, epochs = n.iterations.bp)
+  cat("\014") # is the code to send CTRL+L to the console and therefore will clear the screen. 
+  
+  theta1.centered <- (unlist(T_KG(get_weights(model1))) - red1_0)*sqrt(n-p)
+  #-----------------------------------
+  D2 <- D[Index_Switching(D[,1],2),]
+  
+  model2 <- keras_model_sequential()
+  
+  model2 %>% 
+    layer_dense(units = 64, input_shape = 16) %>%
+    layer_activation(activation = 'sigmoid') %>%
+    layer_dense(units = 32) %>%
+    layer_activation(activation = 'sigmoid') %>%
+    layer_dense(units = 1)
+  
+  model2 %>% compile(
+    loss = 'mean_squared_error',
+    optimizer = optimizer_sgd(learning_rate = 0.001) #, decay = 0.5
+    #metrics = 'mae'
+  )
+  
+  X.train2 <- D2[, 3:ncol(D2)]
+  Y.train2 <- D2[,2]
+  
+  model2 %>% fit(X.train2, Y.train2, epochs = n.iterations.bp)
+  cat("\014") # is the code to send CTRL+L to the console and therefore will clear the screen. 
+  
+  theta2.centered <- (unlist(T_KG(get_weights(model2))) - red2_0)*sqrt(n-p)
+  #--------------------------------
+  D3 <- D[Index_Switching(D[,1],3),]
+  
+  model3 <- keras_model_sequential()
+  
+  model3 %>% 
+    layer_dense(units = 32, input_shape = 16) %>%
+    layer_activation(activation = 'sigmoid') %>%
+    layer_dense(units = 64) %>%
+    layer_activation(activation = 'sigmoid') %>%
+    layer_dense(units = 1)
+  
+  model3 %>% compile(
+    loss = 'mean_squared_error',
+    optimizer = optimizer_sgd(learning_rate = 0.001,  decay = 0.2) #, decay = 0.5
+    #metrics = 'mae'
+  )
+  
+  X.train3 <- D3[, 3:ncol(D3)]
+  Y.train3 <- D3[,2]
+  
+  model3 %>% fit(X.train3, Y.train3, epochs = n.iterations.bp)
+  cat("\014") # is the code to send CTRL+L to the console and therefore will clear the screen. 
+  
+  theta3.centered <- (unlist(T_KG(get_weights(model3))) - red3_0)*sqrt(n-p)
+  
+#-----------------------------------------------------------------------------------
+  theta.centered[i, ] <- c(theta1.centered, theta2.centered, theta3.centered)
+}
+```
+--------------------------------------------------------------------------------
+
+### 5.3. Multivariate Test Normality
+
+Finally we apply several tests in order to study the normality of the estimator. 
+
+#### 5.3.1. The boxplots of a subset of $100$ parameters.
+
+```{r}
+set <- sample(1:ncol(theta.centered), 100)
+boxplot(theta.centered[, set], boxwex=0.5, xlab='100 arbitrarily chosen parameters')
+abline(h=0,lty=9, col='red')
+```
+
+#### 5.3.2. The test of Mardia, Royston and Henze-Zirkler for a subset of $15$ parameters. 
+If package `MVN` is not disponible, use `charme_tools_MVN.R`. 
+```{r, MVN package}
+source("charme_tools_MVN.R")
+```
+
+Mardia's Test:
+```{r}
+result1 <- mardiaTest(theta.centered[, set2],qqplot=FALSE)
+result1
+```
+
+Royston's Test:
+```{r}
+library(moments)
+result2 <- roystonTest(theta.centered[, set2], qqplot = FALSE )
+result2
+```
+
+Henze-Zirkler's Test:
+```{r}
+result3 <- hzTest(theta.centered[, set2], qqplot= TRUE)
+result3
+```
