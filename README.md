@@ -1,11 +1,8 @@
-# R notebook of the numerical experiments of "Learning CHARME models with DNN"
+# R files of the numerical experiments of "Learning CHARME models with DNN"
 
-In order to use this R notebook, first download the folder called "R notebooks CHARME" included in this repository. 
+1.- If you want to reproduce the results, first download all R files of this repository. Then, open "DNN-CHARME.Rmd" with [RStudio](https://rstudio.com/). 
+This is an Rmarkdown that you can compile chunk by chuck (Recommended because there are certain experiments that take a long time to run).
 
-Once the folder is downloaded in your computer, you can see the code by clicking on "DNN-CHARME.nb.html" in that folder.
+2.- You can just look at the results already executed on the html document: "DNN-CHARME.html". 
 
 
-
-If you want to reproduce the results, open "DNN-CHARME.Rmd" with [RStudio](https://rstudio.com/). 
-
-Attention: Do not forget before running the "DNN-CHARME.Rmd" experiments of running all the functions of "Requeriments.Rmd".
